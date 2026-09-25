@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # The vendor-recommended build environment (see README.md). Both
+      # cross-toolchains (u-boot: asdk64-4.9.3-a53-EL, kernel: Linaro 7.3.1)
+      # are vendored under toolchains/ and need no internet access, but the
+      # ancient kernel/u-boot kbuild scripts assume a host userland (bison,
+      # flex, python2-era perl/make behavior, etc.) from around when this
+      # BSP was released -- building on a bare modern Ubuntu image risks
+      # subtle host-tool incompatibilities the vendor image already avoids.
+      - name: Pull vendor build image
+        run: docker pull sinovoip/bpi-build-linux-4.4
+
+      - name: Configure board and build u-boot + kernel
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/workspace" \
+            -w /workspace \
+            sinovoip/bpi-build-linux-4.4 \
+            bash -c "./configure BPI-M4-720P && make -j\$(nproc)"
+
+      - name: Verify build artifacts exist
+        run: |
+          set -e
+          test -s u-boot-rtk/u-boot.bin
+          test -s linux-rtk/arch/arm64/boot/Image
+          ls linux-rtk/arch/arm64/boot/dts/realtek/rtd139x/rtd-1395-bananapi-m4-*.dtb
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: bpi-m4-build-${{ github.sha }}
+          if-no-files-found: error
+          path: |
+            u-boot-rtk/u-boot.bin
+            linux-rtk/arch/arm64/boot/Image
+            linux-rtk/arch/arm64/boot/dts/realtek/rtd139x/rtd-1395-bananapi-m4-*.dtb
