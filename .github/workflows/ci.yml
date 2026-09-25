@@ -23,14 +23,14 @@ jobs:
       # BSP was released -- building on a bare modern Ubuntu image risks
       # subtle host-tool incompatibilities the vendor image already avoids.
       - name: Pull vendor build image
-        run: docker pull sinovoip/bpi-build-linux-4.4
+        run: docker pull sinovoip/bpi-build-linux-4.4:ubuntu16.04
 
       - name: Configure board and build u-boot + kernel
         run: |
           docker run --rm \
             -v "${{ github.workspace }}:/workspace" \
             -w /workspace \
-            sinovoip/bpi-build-linux-4.4 \
+            sinovoip/bpi-build-linux-4.4:ubuntu16.04 \
             bash -c "./configure BPI-M4-720P && make -j\$(nproc)"
 
       - name: Verify build artifacts exist
