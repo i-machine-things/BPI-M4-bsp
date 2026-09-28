@@ -42,7 +42,9 @@ jobs:
           set -e
           test -s u-boot-rtk/u-boot.bin
           test -s linux-rtk/arch/arm64/boot/Image
-          ls linux-rtk/arch/arm64/boot/dts/realtek/rtd139x/rtd-1395-bananapi-m4-*.dtb
+          for f in linux-rtk/arch/arm64/boot/dts/realtek/rtd139x/rtd-1395-bananapi-m4-*.dtb; do
+            test -s "$f"
+          done
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
