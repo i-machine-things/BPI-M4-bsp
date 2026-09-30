@@ -74,6 +74,20 @@ jobs:
             LOOP=$(sudo losetup -fP --show "$f")
             echo "loop device: $LOOP (partitions: ${LOOP}p1 boot, ${LOOP}p2 root)"
 
+            # losetup -fP returns before udev has necessarily created the p1/p2
+            # partition device nodes -- settle and wait for them rather than
+            # racing straight into mount.
+            sudo udevadm settle
+            for i in $(seq 1 10); do
+              [ -b "${LOOP}p1" ] && [ -b "${LOOP}p2" ] && break
+              sleep 1
+            done
+            if [ ! -b "${LOOP}p1" ] || [ ! -b "${LOOP}p2" ]; then
+              echo "::warning::${LOOP}p1 or ${LOOP}p2 never appeared, skipping $f"
+              sudo losetup -d "$LOOP"
+              continue
+            fi
+
             sudo mkdir -p /mnt/boot /mnt/root
             sudo mount -o ro "${LOOP}p1" /mnt/boot
             sudo mount -o ro "${LOOP}p2" /mnt/root
