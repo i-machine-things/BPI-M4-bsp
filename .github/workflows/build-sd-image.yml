@@ -36,7 +36,7 @@ jobs:
           sudo apt-get install -y p7zip-full
 
       - name: Download base image from Google Drive
-        run: gdown --id "$BASE_IMAGE_DRIVE_ID" -O base_image_download
+        run: gdown "$BASE_IMAGE_DRIVE_ID" -O base_image_download
 
       - name: Verify checksum
         run: |
