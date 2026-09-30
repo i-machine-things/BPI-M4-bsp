@@ -5,3 +5,4 @@ Standards and practices reference for this repo — a log of coding patterns and
 ## CI
 
 - The vendor build image `sinovoip/bpi-build-linux-4.4` on Docker Hub has no `:latest` tag — its only published tag is `:ubuntu16.04`. Always pin it explicitly.
+- `gdown` removed the `--id FILEID` flag; pass the Google Drive file ID as the positional argument instead (`gdown FILEID -O dest`).

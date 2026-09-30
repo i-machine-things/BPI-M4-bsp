@@ -1,0 +1,68 @@
+name: Build Flashable SD Image
+
+# This repo has no root filesystem of its own (kernel + u-boot + packaging scripts only -- see
+# docs/FLASHABLE_IMAGE.md), so a self-contained, ready-to-flash image only exists by combining this
+# fork's kernel/u-boot with Banana Pi's official Debian 10 Buster Lite (64-bit) base image -- the only
+# base still published for this board's kernel line (RTD1395 never moved past 4.9.119; Armbian does not
+# support this SoC at all).
+#
+# Manual only for now (workflow_dispatch): the base image lives on a personal Google Drive link, not a
+# stable CDN, and this is the first cut of the overlay logic, so it needs supervised runs before it is
+# trusted on a tag trigger. `inspect_only` downloads the base image and reports its layout without
+# building or modifying anything -- use it first, before trusting the overlay steps added on top.
+
+on:
+  workflow_dispatch:
+    inputs:
+      inspect_only:
+        description: "Inspect-only: download the base image and report its layout, build nothing"
+        type: boolean
+        default: false
+
+env:
+  # Debian 10 Buster Lite, 64-bit, 2019-08-06 (wiki.banana-pi.org / forum.banana-pi.org release thread)
+  BASE_IMAGE_DRIVE_ID: 1QyZX5AGUpEV2OZMXz3qkB8riXROXHdx3
+  BASE_IMAGE_MD5: 5a8b1eb36b782fdd742ba746c645593d
+
+jobs:
+  inspect:
+    if: inputs.inspect_only == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install gdown and p7zip
+        run: |
+          pip install --quiet gdown
+          sudo apt-get update -qq
+          sudo apt-get install -y p7zip-full
+
+      - name: Download base image from Google Drive
+        run: gdown "$BASE_IMAGE_DRIVE_ID" -O base_image_download
+
+      - name: Verify checksum
+        run: |
+          echo "${BASE_IMAGE_MD5}  base_image_download" | md5sum -c -
+
+      - name: Report container format
+        run: |
+          ls -la base_image_download
+          file base_image_download
+
+      - name: Extract and report contents
+        run: |
+          mkdir -p extracted
+          7z x base_image_download -o./extracted || true
+          ls -la extracted
+          for f in extracted/*; do
+            echo "=== $f ==="
+            file "$f"
+          done
+
+      - name: Report partition layout of any raw image(s) found
+        run: |
+          shopt -s nullglob
+          for f in extracted/*.img extracted/*.raw; do
+            echo "=== fdisk -l $f ==="
+            sudo fdisk -l "$f" || true
+            echo "=== parted $f unit MiB print ==="
+            sudo parted -s "$f" unit MiB print || true
+          done
