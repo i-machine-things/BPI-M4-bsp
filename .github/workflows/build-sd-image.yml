@@ -9,13 +9,18 @@ name: Build Flashable SD Image
 # Manual only for now (workflow_dispatch): the base image lives on a personal Google Drive link, not a
 # stable CDN, and this is the first cut of the overlay logic, so it needs supervised runs before it is
 # trusted on a tag trigger. `inspect_only` downloads the base image and reports its layout without
-# building or modifying anything -- use it first, before trusting the overlay steps added on top.
+# building or modifying anything. `inspect_partitions` goes one step further and mounts both partitions
+# read-only to report their actual contents -- use both before trusting the overlay steps added on top.
 
 on:
   workflow_dispatch:
     inputs:
       inspect_only:
         description: "Inspect-only: download the base image and report its layout, build nothing"
+        type: boolean
+        default: false
+      inspect_partitions:
+        description: "Mount both partitions of the base image read-only and report their contents"
         type: boolean
         default: false
 
@@ -66,3 +71,89 @@ jobs:
             echo "=== parted $f unit MiB print ==="
             sudo parted -s "$f" unit MiB print || true
           done
+
+  inspect_partitions:
+    if: inputs.inspect_partitions == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install gdown and p7zip
+        run: |
+          pip install --quiet gdown
+          sudo apt-get update -qq
+          sudo apt-get install -y p7zip-full
+
+      - name: Download base image from Google Drive
+        run: gdown "$BASE_IMAGE_DRIVE_ID" -O base_image_download
+
+      - name: Verify checksum
+        run: |
+          echo "${BASE_IMAGE_MD5}  base_image_download" | md5sum -c -
+
+      - name: Extract raw image
+        run: |
+          mkdir -p extracted
+          7z x base_image_download -o./extracted
+          ls -la extracted
+
+      - name: Mount both partitions read-only and report contents
+        run: |
+          set -e
+          shopt -s nullglob
+          candidates=(extracted/*.img extracted/*.raw)
+          if [ ${#candidates[@]} -eq 0 ]; then
+            echo "::error::No raw image found in extracted/"
+            exit 1
+          fi
+          IMG="${candidates[0]}"
+          echo "Using image: $IMG"
+
+          LOOP=$(sudo losetup -fP --show "$IMG")
+          echo "Loop device: $LOOP"
+
+          # losetup -fP returns before udev has necessarily created the
+          # per-partition device nodes -- settle udev and poll for both
+          # before mounting, or this races a mount against nodes that do
+          # not exist yet (lesson already in CODING_NOTES from a previous
+          # attempt at this exact step).
+          sudo udevadm settle
+          found=0
+          for i in $(seq 1 20); do
+            if [ -b "${LOOP}p1" ] && [ -b "${LOOP}p2" ]; then
+              found=1
+              break
+            fi
+            sleep 0.5
+          done
+          if [ "$found" -ne 1 ]; then
+            echo "::warning::Partition device nodes never appeared for $LOOP -- skipping"
+            sudo losetup -d "$LOOP"
+            exit 0
+          fi
+
+          mkdir -p /tmp/boot /tmp/root
+          sudo mount -o ro "${LOOP}p1" /tmp/boot
+          sudo mount -o ro "${LOOP}p2" /tmp/root
+
+          echo "=== boot partition: $(lsblk -no FSTYPE "${LOOP}p1") ==="
+          sudo find /tmp/boot -maxdepth 5 | sort
+
+          echo
+          echo "=== boot config files ==="
+          for f in /tmp/boot/uEnv.txt /tmp/boot/extlinux/extlinux.conf /tmp/boot/boot.scr /tmp/boot/boot.cmd /tmp/boot/boot.ini; do
+            if sudo test -f "$f"; then
+              echo "--- $f ---"
+              sudo cat "$f"
+              echo
+            fi
+          done
+
+          echo "=== root partition: $(lsblk -no FSTYPE "${LOOP}p2") ==="
+          echo "--- /etc/os-release ---"
+          sudo cat /tmp/root/etc/os-release 2>/dev/null || true
+          echo "--- /lib/modules ---"
+          sudo ls -la /tmp/root/lib/modules 2>/dev/null || true
+          echo "--- /boot (inside root partition, if boot is not its own partition content) ---"
+          sudo find /tmp/root/boot -maxdepth 2 2>/dev/null | sort || true
+
+          sudo umount /tmp/boot /tmp/root
+          sudo losetup -d "$LOOP"
