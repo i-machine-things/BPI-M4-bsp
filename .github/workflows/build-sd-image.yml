@@ -348,9 +348,8 @@ jobs:
           # image's keyring (NO_PUBKEY, confirmed on real hardware) and it's
           # not required for normal system use -- not worth chasing expired
           # signing keys on an EOL release for an opt-in repo nothing needs.
-          cat <<'SOURCES' | sudo tee /tmp/root/etc/apt/sources.list > /dev/null
-deb [check-valid-until=no] http://archive.debian.org/debian buster main contrib non-free
-SOURCES
+          printf '%s\n' 'deb [check-valid-until=no] http://archive.debian.org/debian buster main contrib non-free' \
+            | sudo tee /tmp/root/etc/apt/sources.list > /dev/null
 
           sync
           sudo umount /tmp/boot /tmp/root
