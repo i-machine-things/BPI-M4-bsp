@@ -336,6 +336,22 @@ jobs:
           sudo rm -rf "/tmp/root/lib/modules/${KERNEL_RELEASE}"
           sudo tar -C /tmp/root/lib/modules -xzf "stage/modules-${KERNEL_RELEASE}.tar.gz"
 
+          # Debian 10 (Buster) is EOL -- security.debian.org and the regular
+          # mirrors 404 on every request now, archive.debian.org is the only
+          # place Buster packages still exist, and it carries no security
+          # updates at all. Not a transient outage, so patch it into every
+          # image this workflow builds rather than leaving users to hit this
+          # the first time they run `apt update` (confirmed on real hardware).
+          # archive.debian.org's Release files have an expired Valid-Until,
+          # hence check-valid-until=no. buster-backports is deliberately
+          # omitted: its Release file is signed with keys no longer in this
+          # image's keyring (NO_PUBKEY, confirmed on real hardware) and it's
+          # not required for normal system use -- not worth chasing expired
+          # signing keys on an EOL release for an opt-in repo nothing needs.
+          cat <<'SOURCES' | sudo tee /tmp/root/etc/apt/sources.list > /dev/null
+deb [check-valid-until=no] http://archive.debian.org/debian buster main contrib non-free
+SOURCES
+
           sync
           sudo umount /tmp/boot /tmp/root
           sudo losetup -d "$LOOP"
