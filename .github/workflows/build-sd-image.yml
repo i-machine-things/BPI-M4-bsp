@@ -135,7 +135,7 @@ jobs:
           sudo mount -o ro "${LOOP}p2" /tmp/root
 
           echo "=== boot partition: $(lsblk -no FSTYPE "${LOOP}p1") ==="
-          sudo find /tmp/boot -maxdepth 3 | sort
+          sudo find /tmp/boot -maxdepth 5 | sort
 
           echo
           echo "=== boot config files ==="
