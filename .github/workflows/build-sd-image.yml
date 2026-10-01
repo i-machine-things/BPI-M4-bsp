@@ -1,16 +1,25 @@
 name: Build Flashable SD Image
 
-# This repo has no root filesystem of its own (kernel + u-boot + packaging scripts only -- see
-# docs/FLASHABLE_IMAGE.md), so a self-contained, ready-to-flash image only exists by combining this
-# fork's kernel/u-boot with Banana Pi's official Debian 10 Buster Lite (64-bit) base image -- the only
-# base still published for this board's kernel line (RTD1395 never moved past 4.9.119; Armbian does not
-# support this SoC at all).
+# This repo has no root filesystem of its own (kernel + u-boot + packaging scripts only), so a
+# self-contained, ready-to-flash image only exists by combining this fork's kernel/u-boot with
+# Banana Pi's official Debian 10 Buster Lite (64-bit) base image -- the only base still published
+# for this board's kernel line (RTD1395 never moved past 4.9.119; Armbian does not support this SoC
+# at all).
 #
-# Manual only for now (workflow_dispatch): the base image lives on a personal Google Drive link, not a
-# stable CDN, and this is the first cut of the overlay logic, so it needs supervised runs before it is
-# trusted on a tag trigger. `inspect_only` downloads the base image and reports its layout without
-# building or modifying anything. `inspect_partitions` goes one step further and mounts both partitions
-# read-only to report their actual contents -- use both before trusting the overlay steps added on top.
+# The overlay recipe below is not guesswork -- it mirrors build.sh's own cp_download_files()
+# function exactly (same destination filenames, same "just rename Image to uImage, no mkimage
+# wrapping" behavior confirmed from that function, same modules-directory replacement), plus
+# scripts/bootloader.sh's raw-offset bootloader write (derived from that script's own internal
+# byte math: u-boot.bin lands at the original absolute 2KiB mark on the target device). The actual
+# boot/root partition layout (board subdirectory names, which files to leave untouched -- uEnv.txt,
+# uInitrd, the bluecore.audio firmware blobs) came from a real `inspect_partitions` run against the
+# base image, not assumption.
+#
+# Still manual only (workflow_dispatch): this needs a real hardware boot test before it's trusted on
+# a tag trigger. `inspect_only` and `inspect_partitions` are read-only reconnaissance, unchanged.
+# `build_image` runs the real overlay and uploads the result as a workflow artifact; set
+# `publish_to_tag` too (and `ref`, if backfilling a tag other than whatever ref this was dispatched
+# against) to also attach it to that tag's GitHub Release.
 
 on:
   workflow_dispatch:
@@ -23,11 +32,24 @@ on:
         description: "Mount both partitions of the base image read-only and report their contents"
         type: boolean
         default: false
+      build_image:
+        description: "Build the real flashable image and upload it as a workflow artifact"
+        type: boolean
+        default: false
+      publish_to_tag:
+        description: "Also attach the built image to a GitHub Release for the given ref's tag"
+        type: boolean
+        default: false
+      ref:
+        description: "Tag/ref to build for (build_image/publish_to_tag only). Defaults to whatever ref this workflow was dispatched against -- set explicitly to backfill an older tag."
+        type: string
+        required: false
 
 env:
   # Debian 10 Buster Lite, 64-bit, 2019-08-06 (wiki.banana-pi.org / forum.banana-pi.org release thread)
   BASE_IMAGE_DRIVE_ID: 1QyZX5AGUpEV2OZMXz3qkB8riXROXHdx3
   BASE_IMAGE_MD5: 5a8b1eb36b782fdd742ba746c645593d
+  KERNEL_RELEASE: 4.9.119-BPI-M4-Kernel
 
 jobs:
   inspect:
@@ -157,3 +179,207 @@ jobs:
 
           sudo umount /tmp/boot /tmp/root
           sudo losetup -d "$LOOP"
+
+  build-kernel-artifacts:
+    if: inputs.build_image == true || inputs.publish_to_tag == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    outputs:
+      kernel_release: ${{ env.KERNEL_RELEASE }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Pull vendor build image
+        run: docker pull sinovoip/bpi-build-linux-4.4:ubuntu16.04
+
+      - name: Configure board, build u-boot + kernel + modules, pack bootloader
+        run: |
+          # scripts/bootloader.sh (invoked by `make pack`) writes its output to
+          # /tmp/bpi-m4/*-2k.img.gz -- inside the container, that's the
+          # container's own ephemeral /tmp, which --rm destroys on exit. Mount
+          # a host directory over /tmp so that output actually survives.
+          # bootloader.sh uses losetup/dd to build the bootloader blob, which
+          # needs loop-device access an unprivileged container doesn't get by
+          # default -- --privileged is broad, but the vendor image's own
+          # script is what actually needs it here, not anything we control.
+          mkdir -p container-tmp
+          docker run --rm --privileged \
+            -v "${{ github.workspace }}:/workspace" \
+            -v "${{ github.workspace }}/container-tmp:/tmp" \
+            -w /workspace \
+            sinovoip/bpi-build-linux-4.4:ubuntu16.04 \
+            bash -c '
+              set -e
+              ./configure BPI-M4-720P
+              make -j$(nproc)
+              # scripts/bootloader.sh (invoked by make pack) reads u-boot.bin
+              # from rtk-pack/rtk/bpi-m4/bin/, but nothing in this repo -- not
+              # the Makefile, not build.sh -- ever creates that path. Genuine
+              # gap in the vendor build; place it there ourselves rather than
+              # reimplementing bootloader.sh from scratch.
+              mkdir -p rtk-pack/rtk/bpi-m4/bin
+              cp u-boot-rtk/u-boot.bin rtk-pack/rtk/bpi-m4/bin/u-boot.bin
+              make pack
+            '
+
+      - name: Verify build artifacts exist
+        run: |
+          set -e
+          test -s u-boot-rtk/u-boot.bin
+          test -s linux-rtk/arch/arm64/boot/Image
+          for f in linux-rtk/arch/arm64/boot/dts/realtek/rtd139x/rtd-1395-bananapi-m4-*.dtb; do
+            test -s "$f"
+          done
+          test -d "linux-rtk/output/lib/modules/${KERNEL_RELEASE}"
+          BOOTLOADER=$(find container-tmp -iname 'BPI-M4-*-2k.img.gz' | head -1)
+          test -n "$BOOTLOADER"
+          test -s "$BOOTLOADER"
+          echo "BOOTLOADER_PATH=$BOOTLOADER" >> "$GITHUB_ENV"
+
+      - name: Stage artifacts for the overlay job
+        run: |
+          mkdir -p stage/dtb
+          cp u-boot-rtk/u-boot.bin stage/
+          cp linux-rtk/arch/arm64/boot/Image stage/
+          cp linux-rtk/arch/arm64/boot/dts/realtek/rtd139x/rtd-1395-bananapi-m4-*.dtb stage/dtb/
+          cp "$BOOTLOADER_PATH" stage/bootloader-2k.img.gz
+          tar -C linux-rtk/output/lib/modules -czf "stage/modules-${KERNEL_RELEASE}.tar.gz" "${KERNEL_RELEASE}"
+
+      - name: Upload staged artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-artifacts
+          if-no-files-found: error
+          retention-days: 7
+          path: stage/
+
+  overlay-sd-image:
+    needs: build-kernel-artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    steps:
+      - name: Download staged kernel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: kernel-artifacts
+          path: stage
+
+      - name: Install gdown and p7zip
+        run: |
+          pip install --quiet gdown
+          sudo apt-get update -qq
+          sudo apt-get install -y p7zip-full
+
+      - name: Download base image from Google Drive
+        run: gdown "$BASE_IMAGE_DRIVE_ID" -O base_image_download
+
+      - name: Verify checksum
+        run: echo "${BASE_IMAGE_MD5}  base_image_download" | md5sum -c -
+
+      - name: Extract base image
+        run: |
+          mkdir -p extracted
+          7z x base_image_download -o./extracted
+          rm -f base_image_download
+
+      - name: Overlay this fork's kernel/u-boot/modules onto the base image
+        run: |
+          set -e
+          shopt -s nullglob
+          candidates=(extracted/*.img extracted/*.raw)
+          if [ ${#candidates[@]} -eq 0 ]; then
+            echo "::error::No raw image found in extracted/"
+            exit 1
+          fi
+          OUT_IMG="bpi-m4-flashable.img"
+          mv "${candidates[0]}" "$OUT_IMG"
+
+          LOOP=$(sudo losetup -fP --show "$OUT_IMG")
+          sudo udevadm settle
+          found=0
+          for i in $(seq 1 20); do
+            if [ -b "${LOOP}p1" ] && [ -b "${LOOP}p2" ]; then
+              found=1
+              break
+            fi
+            sleep 0.5
+          done
+          if [ "$found" -ne 1 ]; then
+            echo "::error::Partition device nodes never appeared for $LOOP"
+            sudo losetup -d "$LOOP"
+            exit 1
+          fi
+
+          mkdir -p /tmp/boot /tmp/root
+          sudo mount "${LOOP}p1" /tmp/boot
+          sudo mount "${LOOP}p2" /tmp/root
+
+          # Exactly mirrors build.sh's cp_download_files(): same destination
+          # filenames, Image is renamed straight to uImage with no mkimage
+          # wrapping (confirmed from that function, not assumed), dtb and
+          # u-boot.bin copied as-is. uEnv.txt/uInitrd/the bluecore.audio
+          # firmware blobs are left untouched -- real inspect_partitions
+          # output confirmed they already exist in this exact directory and
+          # nothing else references different filenames.
+          BOOTDIR=/tmp/boot/bananapi/bpi-m4/linux
+          sudo cp stage/Image "$BOOTDIR/uImage"
+          sudo cp stage/dtb/rtd-1395-bananapi-m4-*.dtb "$BOOTDIR/"
+          sudo cp stage/u-boot.bin "$BOOTDIR/u-boot-bpi-m4.bin"
+
+          sudo rm -rf "/tmp/root/lib/modules/${KERNEL_RELEASE}"
+          sudo tar -C /tmp/root/lib/modules -xzf "stage/modules-${KERNEL_RELEASE}.tar.gz"
+
+          sync
+          sudo umount /tmp/boot /tmp/root
+          sudo losetup -d "$LOOP"
+
+          echo "OUT_IMG=$OUT_IMG" >> "$GITHUB_ENV"
+
+      - name: Write bootloader raw blob at the vendor offset
+        run: |
+          set -e
+          # scripts/bootloader.sh writes u-boot.bin at 40KiB into a scratch
+          # buffer, then extracts that buffer from its own 2KiB mark onward
+          # -- so byte 0 of the resulting "-2k" blob corresponds to absolute
+          # offset 2KiB on the target device (40KiB - 2KiB = 38KiB into the
+          # blob, 2KiB + 38KiB = 40KiB absolute, matching where it was
+          # originally written). Write it back at that same absolute offset.
+          gunzip -c stage/bootloader-2k.img.gz > bootloader-2k.img
+          sudo dd if=bootloader-2k.img of="$OUT_IMG" bs=1024 seek=2 conv=notrunc
+          sync
+
+      - name: Compress final image
+        run: |
+          gzip "$OUT_IMG"
+          ls -la "${OUT_IMG}.gz"
+
+      - name: Upload flashable image as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bpi-m4-flashable-image
+          if-no-files-found: error
+          retention-days: 30
+          path: "*.img.gz"
+
+      - name: Determine target tag
+        if: inputs.publish_to_tag == true
+        run: |
+          TAG="${{ inputs.ref }}"
+          if [ -z "$TAG" ]; then
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          echo "RELEASE_TAG=$TAG" >> "$GITHUB_ENV"
+
+      - name: Attach to GitHub Release
+        if: inputs.publish_to_tag == true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$RELEASE_TAG" *.img.gz --repo "${{ github.repository }}" --clobber
