@@ -343,13 +343,25 @@ jobs:
           # image this workflow builds rather than leaving users to hit this
           # the first time they run `apt update` (confirmed on real hardware).
           # archive.debian.org's Release files have an expired Valid-Until,
-          # hence check-valid-until=no. buster-backports is deliberately
-          # omitted: its Release file is signed with keys no longer in this
-          # image's keyring (NO_PUBKEY, confirmed on real hardware) and it's
-          # not required for normal system use -- not worth chasing expired
-          # signing keys on an EOL release for an opt-in repo nothing needs.
-          printf '%s\n' 'deb [check-valid-until=no] http://archive.debian.org/debian buster main contrib non-free' \
-            | sudo tee /tmp/root/etc/apt/sources.list > /dev/null
+          # hence check-valid-until=no.
+          {
+            printf '%s\n' 'deb [check-valid-until=no] http://archive.debian.org/debian buster main contrib non-free'
+            printf '%s\n' 'deb [check-valid-until=no] http://archive.debian.org/debian buster-backports main contrib non-free'
+          } | sudo tee /tmp/root/etc/apt/sources.list > /dev/null
+
+          # buster-backports' Release file on archive.debian.org is signed
+          # with newer Debian Archive Automatic Signing Keys (bullseye/
+          # bookworm era, verified by fetching both key IDs from the
+          # NO_PUBKEY error and inspecting them directly -- genuine
+          # ftpmaster@debian.org keys) that this 2019 image's
+          # debian-archive-keyring package predates (NO_PUBKEY, confirmed on
+          # real hardware). Fetched over HTTPS rather than the native
+          # keyserver protocol to avoid a dirmngr dependency on the runner.
+          curl -fsSL \
+            "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x0E98404D386FA1D9" \
+            "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x6ED0E7B82643E131" \
+            | gpg --dearmor \
+            | sudo tee /tmp/root/etc/apt/trusted.gpg.d/debian-archive-buster-backports.gpg > /dev/null
 
           sync
           sudo umount /tmp/boot /tmp/root
